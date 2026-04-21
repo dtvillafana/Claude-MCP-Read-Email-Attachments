@@ -95,6 +95,11 @@ Then:
 1. Copy the **Application (client) ID** from the Overview page
 2. Go to **Authentication** → enable **Allow public client flows** → **Save**
 3. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** → add `User.Read` and `Mail.Read` → **Grant admin consent**
+4. Go to **Manifest** → find `requestedAccessTokenVersion` (it may be nested inside `api`) → set it to `2` → **Save**
+
+> **Why step 4?** When your app supports personal Microsoft accounts, Microsoft Entra requires access tokens to be v2. The portal doesn't always set this automatically, and the `common` endpoint will fail with `AADSTS50059` if the token version is still `null` or `1`. If you skip this step you will get `invalid_grant` errors during `begin_auth`.
+
+> **Using v1 API integrations?** Only set this to `2` if all your Graph/API permissions support v2 tokens (all Microsoft Graph delegated permissions do). If you're integrating custom APIs that only accept v1 tokens, use `M365_TENANT_ID=consumers` (personal accounts only) or a specific tenant ID instead of `common`, and leave `requestedAccessTokenVersion` at its default.
 
 ### 2. Clone and Install
 
@@ -251,7 +256,9 @@ Find the latest invoice email and extract the total amount, due date, and line i
 | Problem | Solution |
 |---|---|
 | Claude cannot find MCP tools | Restart Claude Desktop completely. Check that `command` and `args` paths in the config are correct and absolute. |
-| `invalid_grant` error | Re-check your Entra app: supported account types, public client flow enabled, `User.Read` and `Mail.Read` permissions granted. |
+| `invalid_grant` error with empty `userCode` in logs | Almost always a token-version or account-type mismatch on the Entra app. See the next two rows. |
+| `AADSTS50059: No tenant-identifying information found` | Your app does not support the `common` endpoint. Open the Entra app → **Authentication** → set **Supported account types** to **Accounts in any organizational directory and personal Microsoft accounts**, then save. |
+| `Property api.requestedAccessTokenVersion is invalid` when saving account types | Open the Entra app → **Manifest** → set `requestedAccessTokenVersion` to `2` → save. Then retry changing the account type. |
 | Device code not showing | Make sure `begin_auth` was called successfully. Do not manually enter a code. |
 | Want to switch Microsoft accounts | Restart Claude Desktop and call `begin_auth` again in a private browser window. |
 | Debug log location | `<M365_MCP_DATA_DIR>\debug.log` — defaults to a subdirectory auto-created next to `server.mjs`. |

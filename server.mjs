@@ -267,6 +267,7 @@ async function startDeviceCodeAuth() {
     .acquireTokenByDeviceCode({
       scopes: SCOPES,
       deviceCodeCallback: (response) => {
+        log("deviceCodeCallback RAW RESPONSE", JSON.stringify(response));
         const message = response?.message || "";
         const verificationUri = getDeviceLoginUrlFromMessage(message);
         const userCode = response?.userCode || response?.user_code || null;
@@ -308,6 +309,15 @@ async function startDeviceCodeAuth() {
       return result.accessToken;
     })
     .catch((err) => {
+      log("MSAL ERROR FULL DETAIL", {
+        name: err?.name,
+        message: err?.message,
+        errorCode: err?.errorCode,
+        errorMessage: err?.errorMessage,
+        subError: err?.subError,
+        correlationId: err?.correlationId,
+        stack: err?.stack,
+      });
       setAuthState({
         status: "error",
         error: String(err?.message || err),
