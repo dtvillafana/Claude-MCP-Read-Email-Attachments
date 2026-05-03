@@ -1,8 +1,8 @@
 # M365 Attachment Reader MCP Local
+[![Claude-MCP-Read-Email-Attachments MCP server](https://glama.ai/mcp/servers/Zacccck/Claude-MCP-Read-Email-Attachments/badges/score.svg)](https://glama.ai/mcp/servers/Zacccck/Claude-MCP-Read-Email-Attachments)
 
-A local `stdio` MCP server for Claude Desktop that reads Outlook emails and deeply parses email attachments through the Microsoft Graph API.
+A local `stdio` MCP server for Claude Desktop that reads Outlook emails and deeply parses email attachments through the Microsoft Graph API.  
 
-[![Claude-MCP-Read-Email-Attachments MCP server](https://glama.ai/mcp/servers/Zacccck/Claude-MCP-Read-Email-Attachments/badges/card.svg)](https://glama.ai/mcp/servers/Zacccck/Claude-MCP-Read-Email-Attachments)
 
 > Status: Functional for personal single-user local use with Claude Desktop.
 
