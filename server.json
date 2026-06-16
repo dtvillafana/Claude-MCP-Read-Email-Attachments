@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.zacccck/m365-attachment-reader-mcp-local",
-  "description": "Local stdio MCP server for Claude Desktop that reads and parses Outlook email attachments via Microsoft Graph.",
+  "description": "Local stdio MCP server for Claude Desktop that reads Outlook emails and message bodies, parses attachments (PDF/OCR/Word/PowerPoint/Excel/images/archives/MSG), and sends local files as Outlook attachments — via Microsoft Graph.",
   "status": "active",
   "repository": {
     "url": "https://github.com/Zacccck/Claude-MCP-Read-Email-Attachments",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packages": [
     {
       "registry_type": "npm",
       "registry_base_url": "https://registry.npmjs.org",
       "identifier": "m365-attachment-reader-mcp-local",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },
@@ -37,6 +37,20 @@
           "description": "Whether begin_auth should attempt to open the Microsoft login page automatically.",
           "is_required": false,
           "format": "boolean",
+          "is_secret": false
+        },
+        {
+          "name": "M365_SEND_MAX_BYTES",
+          "description": "Optional total attachment-size budget (bytes) for send_outlook_email. Default 3145728 (3 MB); must stay under Graph's ~4 MB request limit.",
+          "is_required": false,
+          "format": "string",
+          "is_secret": false
+        },
+        {
+          "name": "M365_SEND_ALLOWED_DIRS",
+          "description": "Optional OS-path-separated allowlist of directories send_outlook_email may read attachment files from. Empty (default) allows any readable path.",
+          "is_required": false,
+          "format": "string",
           "is_secret": false
         }
       ]
