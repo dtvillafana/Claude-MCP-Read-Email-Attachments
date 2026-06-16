@@ -4,3 +4,6 @@ node_modules/
 *.mcpb
 
 .m365-attachment-reader-mcp-local/
+
+# persistent MSAL token cache (contains refresh token — never commit)
+msal-cache.json

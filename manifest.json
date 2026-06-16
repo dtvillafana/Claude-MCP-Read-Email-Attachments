@@ -1,28 +1,29 @@
 {
-  "manifest_version": "0.1",
-  "dxt_version": "0.1",
+  "manifest_version": "0.2",
   "name": "m365-attachment-reader-mcp-local",
-  "display_name": "M365 Attachment Reader MCP Local",
-  "version": "0.1.0",
-  "description": "Read and parse Outlook email attachments locally inside Claude Desktop using Microsoft Graph.",
-  "long_description": "A local single-user MCP server for Claude Desktop that authenticates to Microsoft 365 using device code flow, lists Outlook messages and attachments, and parses attachment content including OCR-scanned PDFs, Word, PowerPoint, Excel, images, archives, and Outlook MSG files.",
+  "display_name": "M365 Outlook Attachments (Read & Send)",
+  "version": "0.2.0",
+  "description": "Read Outlook email attachments and send local files (e.g. PPTX) as Outlook attachments locally inside Claude Desktop using Microsoft Graph.",
+  "long_description": "A local single-user MCP server for Claude Desktop that authenticates to Microsoft 365 using device code flow, lists Outlook messages and attachments, and parses attachment content including OCR-scanned PDFs, Word, PowerPoint, Excel, images, archives, and Outlook MSG files. It can also compose an Outlook email with local files attached (such as a daily dashboard .pptx) and either save it as a draft for review or send it immediately.",
   "author": {
     "name": "Zacccck",
     "url": "https://github.com/Zacccck"
   },
   "server": {
     "type": "node",
-    "entry_point": "server.mjs"
-  },
-  "mcp_config": {
-    "command": "node",
-    "args": [
-      "${__dirname}/server.mjs"
-    ],
-    "env": {
-      "M365_CLIENT_ID": "${user_config.m365_client_id}",
-      "M365_TENANT_ID": "${user_config.m365_tenant_id}",
-      "M365_AUTO_OPEN_BROWSER": "${user_config.m365_auto_open_browser}"
+    "entry_point": "server.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server.mjs"
+      ],
+      "env": {
+        "M365_CLIENT_ID": "${user_config.m365_client_id}",
+        "M365_TENANT_ID": "${user_config.m365_tenant_id}",
+        "M365_AUTO_OPEN_BROWSER": "${user_config.m365_auto_open_browser}",
+        "M365_SEND_MAX_BYTES": "${user_config.m365_send_max_bytes}",
+        "M365_SEND_ALLOWED_DIRS": "${user_config.m365_send_allowed_dirs}"
+      }
     }
   },
   "user_config": {
@@ -30,16 +31,14 @@
       "title": "Microsoft Entra App Client ID",
       "description": "Application (client) ID from your Microsoft Entra app registration.",
       "type": "string",
-      "required": true,
-      "secret": false
+      "required": true
     },
     "m365_tenant_id": {
       "title": "Tenant ID",
       "description": "Optional Microsoft Entra tenant ID. Use common for most personal or multi-tenant setups.",
       "type": "string",
       "required": false,
-      "default": "common",
-      "secret": false
+      "default": "common"
     },
     "m365_auto_open_browser": {
       "title": "Auto-open browser",
@@ -47,6 +46,18 @@
       "type": "boolean",
       "required": false,
       "default": true
+    },
+    "m365_send_max_bytes": {
+      "title": "Max outbound attachment size (bytes)",
+      "description": "Optional total size budget for send_outlook_email attachments. Defaults to 3 MB; must stay under Microsoft Graph's ~4 MB request limit. Leave blank to use the default.",
+      "type": "string",
+      "required": false
+    },
+    "m365_send_allowed_dirs": {
+      "title": "Allowed attachment directories",
+      "description": "Optional OS-path-separated list of base directories that send_outlook_email may read files from. Leave blank to allow any readable path.",
+      "type": "string",
+      "required": false
     }
   },
   "tools": [
@@ -73,10 +84,26 @@
     {
       "name": "read_email_attachment",
       "description": "Download and parse an Outlook attachment, including OCR and image-based formats."
+    },
+    {
+      "name": "read_email",
+      "description": "Read the full text/body of a specific Outlook email (subject, sender, recipients, date, body)."
+    },
+    {
+      "name": "send_outlook_email",
+      "description": "Compose an Outlook email with local file attachments (e.g. a .pptx) and save it as a draft or send it immediately."
     }
   ],
   "compatibility": {
-    "node": ">=20"
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
   },
   "license": "MIT"
 }

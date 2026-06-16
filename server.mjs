@@ -68,7 +68,11 @@ const DEBUG_LOG = path.join(APP_DATA_DIR, "debug.log");
 const CLIENT_ID = process.env.M365_CLIENT_ID;
 const TENANT_ID = process.env.M365_TENANT_ID || "common";
 const AUTHORITY = `https://login.microsoftonline.com/${TENANT_ID}`;
-const SCOPES = ["User.Read", "Mail.Read"];
+// Mail.ReadWrite subsumes Mail.Read (used by the read tools) and is required to
+// create drafts; Mail.Send is required to send mail. Adding these scopes means
+// users must re-consent (add the delegated permissions in Entra, then re-run
+// begin_auth) — an existing token does not gain new scopes automatically.
+const SCOPES = ["User.Read", "Mail.ReadWrite", "Mail.Send"];
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const AUTO_OPEN_BROWSER =
   String(process.env.M365_AUTO_OPEN_BROWSER || "true").toLowerCase() !== "false";
@@ -86,6 +90,27 @@ const MAX_ARCHIVE_ENTRY_BYTES = 20 * 1024 * 1024;
 const MAX_NESTED_DEPTH = 2;
 const MAX_MSG_ATTACHMENTS = 5;
 
+// Outbound send-with-attachment limits. Microsoft Graph inlines base64
+// attachments only when each file is < 3 MB and the whole write request stays
+// under ~4 MB (base64 inflates binary by ~33%). We keep a conservative total
+// budget so multi-file sends don't blow the request cap.
+const MAX_SEND_FILE_BYTES = 3 * 1024 * 1024;
+const MAX_SEND_TOTAL_BYTES = Number(process.env.M365_SEND_MAX_BYTES) || 3 * 1024 * 1024;
+
+// Optional allowlist of base directories that local attachments must live under.
+// Empty (default) means any readable path is allowed. Use the OS path separator
+// (":" on macOS/Linux, ";" on Windows) to list multiple roots.
+const ALLOWED_SEND_DIRS = String(process.env.M365_SEND_ALLOWED_DIRS || "")
+  .split(path.delimiter)
+  .map((dir) => dir.trim())
+  .filter(Boolean)
+  // Ignore unsubstituted DXT template placeholders (e.g. "${user_config.x}")
+  // that some clients pass literally when an optional config field is left blank.
+  // Without this, a blank allowlist would resolve to one bogus path and reject
+  // every real file. Empty/placeholder => no allowlist => any readable path.
+  .filter((dir) => !dir.includes("${"))
+  .map((dir) => path.resolve(dir));
+
 const IMAGE_MIME_BY_EXT = {
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -95,6 +120,31 @@ const IMAGE_MIME_BY_EXT = {
   bmp: "image/bmp",
   tif: "image/tiff",
   tiff: "image/tiff",
+};
+
+// Content types for outbound attachments, keyed by file extension. Falls back to
+// application/octet-stream for anything unlisted. Includes the image types so
+// loadLocalAttachment can resolve every supported format from a single map.
+const MIME_BY_EXT = {
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  pptm: "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+  ppsx: "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+  potx: "application/vnd.openxmlformats-officedocument.presentationml.template",
+  ppt: "application/vnd.ms-powerpoint",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xlsm: "application/vnd.ms-excel.sheet.macroEnabled.12",
+  xls: "application/vnd.ms-excel",
+  pdf: "application/pdf",
+  csv: "text/csv",
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+  xml: "application/xml",
+  html: "text/html",
+  zip: "application/zip",
+  ...IMAGE_MIME_BY_EXT,
 };
 
 let pdfOcrDepsPromise = null;
@@ -175,11 +225,42 @@ if (!CLIENT_ID) {
   log("Missing M365_CLIENT_ID in env");
 }
 
+const MSAL_CACHE_PATH = path.join(APP_DATA_DIR, "msal-cache.json");
+
+// Persist MSAL's token cache (including the refresh token) to disk so auth
+// survives app/process restarts. With this the user signs in once and the
+// server can silently refresh access tokens going forward (refresh tokens roll
+// for ~90 days), which is what makes unattended scheduled runs reliable.
+// The file holds sensitive tokens, so it is written with 0600 permissions.
+const cachePlugin = {
+  async beforeCacheAccess(context) {
+    try {
+      if (fs.existsSync(MSAL_CACHE_PATH)) {
+        context.tokenCache.deserialize(fs.readFileSync(MSAL_CACHE_PATH, "utf8"));
+      }
+    } catch (err) {
+      log("MSAL cache read failed", err?.message || String(err));
+    }
+  },
+  async afterCacheAccess(context) {
+    try {
+      if (context.cacheHasChanged) {
+        fs.writeFileSync(MSAL_CACHE_PATH, context.tokenCache.serialize(), {
+          mode: 0o600,
+        });
+      }
+    } catch (err) {
+      log("MSAL cache write failed", err?.message || String(err));
+    }
+  },
+};
+
 const pca = new PublicClientApplication({
   auth: {
     clientId: CLIENT_ID || "missing-client-id",
     authority: AUTHORITY,
   },
+  cache: { cachePlugin },
 });
 
 let currentAccount = null;
@@ -331,11 +412,34 @@ async function startDeviceCodeAuth() {
   return authPromise;
 }
 
+async function restoreAccountFromCache() {
+  if (currentAccount) return currentAccount;
+  try {
+    const accounts = await pca.getTokenCache().getAllAccounts();
+    if (accounts && accounts.length > 0) {
+      currentAccount = accounts[0];
+      setAuthState({
+        status: "authenticated",
+        account: currentAccount.username || null,
+        error: null,
+      });
+      log("Restored account from persistent cache", currentAccount.username || "");
+    }
+  } catch (err) {
+    log("restoreAccountFromCache failed", err?.message || String(err));
+  }
+  return currentAccount;
+}
+
 async function getValidAccessToken() {
   ensureConfigured();
 
   const cached = getCachedToken();
   if (cached) return cached;
+
+  if (!currentAccount) {
+    await restoreAccountFromCache();
+  }
 
   if (currentAccount) {
     try {
@@ -416,6 +520,30 @@ async function graphGetBytes(url) {
 
   const arrayBuffer = await res.arrayBuffer();
   return Buffer.from(arrayBuffer);
+}
+
+async function graphSend(method, url, bodyObj) {
+  const token = await getValidAccessToken();
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: bodyObj ? JSON.stringify(bodyObj) : undefined,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    log("graphSend failed", { method, url, status: res.status, text });
+    throw new Error(`Graph API ${res.status}: ${text}`);
+  }
+
+  // sendMail returns 202 with no body; createMessage returns 201 with JSON.
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 function mailboxPrefix(mailbox = "me") {
@@ -1547,10 +1675,94 @@ async function parseAttachmentPayload(payload, context, depth = 0) {
   };
 }
 
+function htmlToPlainText(html) {
+  return normalizeExtractedText(
+    decodeXmlEntities(
+      String(html || "")
+        .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
+        .replace(/<\/(p|div|li|tr|h[1-6]|blockquote)>/gi, "\n")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<li[^>]*>/gi, "- ")
+        .replace(/<[^>]+>/g, "")
+    )
+  );
+}
+
+function normalizeEmailList(value) {
+  if (value === null || value === undefined) return [];
+  const list = Array.isArray(value) ? value : String(value).split(/[;,]/);
+  return list.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function buildRecipients(value) {
+  return normalizeEmailList(value).map((address) => ({
+    emailAddress: { address },
+  }));
+}
+
+function getMimeForExt(ext) {
+  return MIME_BY_EXT[String(ext || "").toLowerCase()] || "application/octet-stream";
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function loadLocalAttachment(filePath) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    throw new Error("Each attachment must be a non-empty file path string.");
+  }
+  if (filePath.includes("\u0000")) {
+    throw new Error("Attachment path contains an invalid NUL byte.");
+  }
+
+  const resolved = path.resolve(filePath.trim());
+
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(`File not found or not readable: ${resolved}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Not a regular file: ${resolved}`);
+  }
+
+  if (ALLOWED_SEND_DIRS.length > 0) {
+    const allowed = ALLOWED_SEND_DIRS.some(
+      (dir) => resolved === dir || resolved.startsWith(dir + path.sep)
+    );
+    if (!allowed) {
+      throw new Error(
+        `File is outside the allowed send directories (M365_SEND_ALLOWED_DIRS): ${resolved}`
+      );
+    }
+  }
+
+  const raw = fs.readFileSync(resolved);
+  const name = path.basename(resolved);
+  const ext = getExtension(name);
+
+  return {
+    name,
+    ext,
+    bytes: raw.length,
+    path: resolved,
+    attachment: {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      name,
+      contentType: getMimeForExt(ext),
+      contentBytes: raw.toString("base64"),
+    },
+  };
+}
+
 function createServer() {
   const server = new McpServer({
     name: APP_NAME,
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   const healthHandler = async () => ({
@@ -1679,7 +1891,7 @@ function createServer() {
       const collectionUrl = messageCollectionUrl(mailbox, folder);
       const url =
         `${collectionUrl}` +
-        `?$select=id,subject,receivedDateTime,hasAttachments,from` +
+        `?$select=id,subject,receivedDateTime,hasAttachments,from,bodyPreview` +
         `&$orderby=receivedDateTime desc` +
         `&$top=${fetchLimit}`;
 
@@ -1694,6 +1906,7 @@ function createServer() {
         hasAttachments: message.hasAttachments,
         fromName: message.from?.emailAddress?.name || "",
         fromAddress: message.from?.emailAddress?.address || "",
+        bodyPreview: message.bodyPreview || "",
       }));
 
       if (onlyWithAttachments) {
@@ -1714,7 +1927,7 @@ function createServer() {
           ? messages
               .map(
                 (message, index) =>
-                  `${index + 1}. ${message.subject || "(no subject)"}\nFrom: ${formatSender(message.fromName, message.fromAddress)}\nReceived: ${message.receivedDateTime}\nHas Attachments: ${message.hasAttachments}\nMessage ID: ${message.id}`
+                  `${index + 1}. ${message.subject || "(no subject)"}\nFrom: ${formatSender(message.fromName, message.fromAddress)}\nReceived: ${message.receivedDateTime}\nHas Attachments: ${message.hasAttachments}${message.bodyPreview ? `\nPreview: ${message.bodyPreview.slice(0, 200)}` : ""}\nMessage ID: ${message.id}`
               )
               .join("\n\n")
           : [
@@ -1957,6 +2170,295 @@ function createServer() {
     readAttachmentHandler
   );
 
+  const readEmailHandler = async ({ messageId, mailbox }) => {
+    try {
+      const base = mailboxPrefix(mailbox);
+      const url =
+        `${base}/messages/${encodeURIComponent(messageId)}` +
+        `?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,bodyPreview,body,webLink`;
+      const m = await graphGetJson(url);
+
+      const fromStr = formatSender(
+        m.from?.emailAddress?.name,
+        m.from?.emailAddress?.address
+      );
+      const toStr = (m.toRecipients || [])
+        .map((r) => r.emailAddress?.address)
+        .filter(Boolean)
+        .join(", ");
+      const ccStr = (m.ccRecipients || [])
+        .map((r) => r.emailAddress?.address)
+        .filter(Boolean)
+        .join(", ");
+
+      const isHtml = String(m.body?.contentType || "").toLowerCase() === "html";
+      const bodyText = isHtml
+        ? htmlToPlainText(m.body?.content)
+        : normalizeExtractedText(m.body?.content || "");
+      const truncated = truncateExtractedText(bodyText);
+
+      const headerLines = [
+        `Subject: ${m.subject || "(no subject)"}`,
+        `From: ${fromStr}`,
+        toStr ? `To: ${toStr}` : "",
+        ccStr ? `Cc: ${ccStr}` : "",
+        `Received: ${m.receivedDateTime || ""}`,
+        `Has attachments: ${m.hasAttachments ? "yes" : "no"}`,
+      ].filter(Boolean);
+
+      if (truncated.truncated) {
+        headerLines.push(
+          `Notice: body truncated to ${truncated.returnedLength.toLocaleString()} of ${truncated.totalLength.toLocaleString()} characters.`
+        );
+      }
+
+      const textOut = `${headerLines.join("\n")}\n\n${truncated.text || "(empty body)"}`;
+
+      return {
+        structuredContent: {
+          message: {
+            id: m.id,
+            subject: m.subject,
+            from: fromStr,
+            to: toStr,
+            cc: ccStr,
+            receivedDateTime: m.receivedDateTime,
+            sentDateTime: m.sentDateTime,
+            hasAttachments: !!m.hasAttachments,
+            webLink: m.webLink,
+            bodyPreview: m.bodyPreview || "",
+            bodyTextLength: bodyText.length,
+            truncated: truncated.truncated,
+          },
+        },
+        content: [{ type: "text", text: textOut }],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(err?.message || err) }],
+      };
+    }
+  };
+
+  registerAliases(
+    server,
+    "read_email",
+    {
+      title: "Read Outlook Email Body",
+      description:
+        "Fetch and return the full text of a specific Outlook email: subject, sender, recipients, date, and the message body (HTML is converted to plain text). Use list_recent_messages first to get the messageId. This reads the email body itself, complementing read_email_attachment which reads attachment contents.",
+      inputSchema: z.object({
+        messageId: z.string(),
+        mailbox: z.string().default("me"),
+      }),
+    },
+    readEmailHandler
+  );
+
+  const sendEmailHandler = async ({
+    to,
+    cc,
+    bcc,
+    subject,
+    body,
+    bodyType,
+    attachments,
+    send_now,
+    save_to_sent,
+    mailbox,
+  }) => {
+    try {
+      ensureConfigured();
+
+      const toRecipients = buildRecipients(to);
+      if (toRecipients.length === 0) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: "At least one recipient is required in 'to'." },
+          ],
+        };
+      }
+
+      let loaded;
+      try {
+        loaded = (attachments || []).map(loadLocalAttachment);
+      } catch (fileErr) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: String(fileErr?.message || fileErr) }],
+        };
+      }
+
+      const totalBytes = loaded.reduce((sum, item) => sum + item.bytes, 0);
+      const oversizeFile = loaded.find((item) => item.bytes >= MAX_SEND_FILE_BYTES);
+
+      if (oversizeFile) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `Attachment "${oversizeFile.name}" is ${formatBytes(oversizeFile.bytes)}, which exceeds the ` +
+                `${formatBytes(MAX_SEND_FILE_BYTES)} per-file limit for inline sending.\n\n` +
+                "This build only supports small attachments via a single Graph request. Files >= 3 MB " +
+                "require the chunked upload-session flow, which is not enabled in this version.",
+            },
+          ],
+        };
+      }
+
+      if (totalBytes > MAX_SEND_TOTAL_BYTES) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `Total attachment size is ${formatBytes(totalBytes)}, which exceeds the inline send budget of ` +
+                `${formatBytes(MAX_SEND_TOTAL_BYTES)}. Send fewer or smaller files, or raise M365_SEND_MAX_BYTES ` +
+                "(it must still stay under Microsoft Graph's ~4 MB request limit).",
+            },
+          ],
+        };
+      }
+
+      const message = {
+        subject: subject || "",
+        body: {
+          contentType: bodyType === "HTML" ? "HTML" : "Text",
+          content: body || "",
+        },
+        toRecipients,
+      };
+
+      const ccRecipients = buildRecipients(cc);
+      const bccRecipients = buildRecipients(bcc);
+      if (ccRecipients.length) message.ccRecipients = ccRecipients;
+      if (bccRecipients.length) message.bccRecipients = bccRecipients;
+      if (loaded.length) {
+        message.attachments = loaded.map((item) => item.attachment);
+      }
+
+      const base = mailboxPrefix(mailbox);
+      const fileSummary = loaded.length
+        ? loaded
+            .map((item) => `- ${item.name} (${formatBytes(item.bytes)}, ${item.attachment.contentType})`)
+            .join("\n")
+        : "(none)";
+      const recipientSummary = [
+        `To: ${normalizeEmailList(to).join(", ")}`,
+        ccRecipients.length ? `Cc: ${normalizeEmailList(cc).join(", ")}` : "",
+        bccRecipients.length ? `Bcc: ${normalizeEmailList(bcc).join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const recipientCount =
+        toRecipients.length + ccRecipients.length + bccRecipients.length;
+
+      if (send_now) {
+        await graphSend("POST", `${base}/sendMail`, {
+          message,
+          saveToSentItems: save_to_sent !== false,
+        });
+
+        return {
+          structuredContent: {
+            action: "sent",
+            mailbox: mailbox || "me",
+            subject: message.subject,
+            recipientCount,
+            attachmentCount: loaded.length,
+            totalAttachmentBytes: totalBytes,
+            savedToSentItems: save_to_sent !== false,
+          },
+          content: [
+            {
+              type: "text",
+              text: [
+                "Email sent via Microsoft Graph.",
+                recipientSummary,
+                `Subject: ${message.subject || "(no subject)"}`,
+                `Attachments:\n${fileSummary}`,
+                `Saved to Sent Items: ${save_to_sent !== false ? "yes" : "no"}`,
+              ].join("\n\n"),
+            },
+          ],
+        };
+      }
+
+      const draft = await graphSend("POST", `${base}/messages`, message);
+
+      return {
+        structuredContent: {
+          action: "draft_created",
+          mailbox: mailbox || "me",
+          draftId: draft?.id || null,
+          webLink: draft?.webLink || null,
+          subject: message.subject,
+          recipientCount,
+          attachmentCount: loaded.length,
+          totalAttachmentBytes: totalBytes,
+        },
+        content: [
+          {
+            type: "text",
+            text: [
+              "Draft created in your Outlook Drafts folder (nothing was sent).",
+              recipientSummary,
+              `Subject: ${message.subject || "(no subject)"}`,
+              `Attachments:\n${fileSummary}`,
+              draft?.webLink ? `Open to review and send:\n${draft.webLink}` : "",
+              "To send directly, call this tool again with send_now=true.",
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(err?.message || err) }],
+      };
+    }
+  };
+
+  registerAliases(
+    server,
+    "send_outlook_email",
+    {
+      title: "Send Outlook Email with Local Attachments",
+      description:
+        "Compose an Outlook email with local files attached (e.g. a daily dashboard .pptx) and either save it as a draft for review (default) or send it immediately. Attachments are read from the local filesystem and inlined via Microsoft Graph; each file must be under 3 MB. Set send_now=true to send without review.",
+      inputSchema: z.object({
+        to: z
+          .union([z.string(), z.array(z.string())])
+          .describe("Recipient email address(es); a string (comma/semicolon separated) or an array."),
+        cc: z.union([z.string(), z.array(z.string())]).optional(),
+        bcc: z.union([z.string(), z.array(z.string())]).optional(),
+        subject: z.string().optional().default(""),
+        body: z.string().optional().default(""),
+        bodyType: z.enum(["Text", "HTML"]).optional().default("Text"),
+        attachments: z
+          .array(z.string())
+          .optional()
+          .default([])
+          .describe("Absolute or relative local file paths to attach."),
+        send_now: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("false (default) saves a draft; true sends immediately."),
+        save_to_sent: z.boolean().optional().default(true),
+        mailbox: z.string().default("me"),
+      }),
+    },
+    sendEmailHandler
+  );
+
   return server;
 }
 
@@ -1986,6 +2488,15 @@ async function shutdown(signal) {
 async function main() {
   activeServer = createServer();
   activeTransport = new StdioServerTransport();
+
+  // Restore a previously-authenticated account from the persistent token cache
+  // so the server is ready to silently refresh tokens after a restart, with no
+  // interactive begin_auth needed (key for unattended scheduled runs).
+  if (CLIENT_ID) {
+    await restoreAccountFromCache().catch((err) =>
+      log("startup restoreAccountFromCache failed", err?.message || String(err))
+    );
+  }
 
   process.on("SIGINT", () => {
     shutdown("SIGINT")

@@ -1,7 +1,7 @@
 {
   "name": "m365-attachment-reader-mcp-local",
-  "version": "0.1.0",
-  "description": "A local stdio MCP server for Claude Desktop that reads and parses Outlook email attachments including PDF, OCR-scanned PDF, Word, PowerPoint, Excel, images, archives, and MSG files via Microsoft Graph API.",
+  "version": "0.2.0",
+  "description": "A local stdio MCP server for Claude Desktop that reads and parses Outlook email attachments (PDF, OCR-scanned PDF, Word, PowerPoint, Excel, images, archives, MSG) and sends local files such as PPTX as Outlook attachments via the Microsoft Graph API.",
   "type": "module",
   "main": "server.mjs",
   "bin": {
@@ -30,6 +30,8 @@
     "microsoft-365",
     "outlook",
     "email-attachments",
+    "send-email",
+    "sendmail",
     "ocr",
     "powerpoint",
     "pptx",
