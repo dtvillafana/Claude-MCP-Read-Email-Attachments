@@ -1882,44 +1882,52 @@ function createServer() {
   }) => {
     try {
       const requestedTop = top;
-      const fetchLimit = Math.min(
-        Math.max(
-          requestedTop * (onlyWithAttachments || subjectContains || fromContains ? 5 : 2),
-          25
-        ),
-        100
-      );
+      const perPage = 100;
+      const maxPages = Math.min(Math.max(Math.ceil(requestedTop / 20), 5), 100);
       const collectionUrl = messageCollectionUrl(mailbox, folder);
-      const url =
-        `${collectionUrl}` +
-        `?$select=id,subject,receivedDateTime,hasAttachments,from,bodyPreview` +
-        `&$orderby=receivedDateTime desc` +
-        `&$top=${fetchLimit}`;
-
-      const data = await graphGetJson(url);
       const subjectNeedle = normalizeNeedle(subjectContains);
       const fromNeedle = normalizeNeedle(fromContains);
 
-      let messages = (data.value || []).map((message) => ({
-        id: message.id,
-        subject: message.subject,
-        receivedDateTime: message.receivedDateTime,
-        hasAttachments: message.hasAttachments,
-        fromName: message.from?.emailAddress?.name || "",
-        fromAddress: message.from?.emailAddress?.address || "",
-        bodyPreview: message.bodyPreview || "",
-      }));
+      let nextUrl =
+        `${collectionUrl}` +
+        `?$select=id,subject,receivedDateTime,hasAttachments,from,bodyPreview` +
+        `&$orderby=receivedDateTime desc` +
+        `&$top=${perPage}`;
 
-      if (onlyWithAttachments) {
-        messages = messages.filter((message) => message.hasAttachments);
+      let messages = [];
+      let scannedCount = 0;
+      let pages = 0;
+
+      while (nextUrl && messages.length < requestedTop && pages < maxPages) {
+        const data = await graphGetJson(nextUrl);
+        const batch = data.value || [];
+        scannedCount += batch.length;
+        pages += 1;
+
+        let mapped = batch.map((message) => ({
+          id: message.id,
+          subject: message.subject,
+          receivedDateTime: message.receivedDateTime,
+          hasAttachments: message.hasAttachments,
+          fromName: message.from?.emailAddress?.name || "",
+          fromAddress: message.from?.emailAddress?.address || "",
+          bodyPreview: message.bodyPreview || "",
+        }));
+
+        if (onlyWithAttachments) {
+          mapped = mapped.filter((message) => message.hasAttachments);
+        }
+
+        mapped = mapped.filter(
+          (message) =>
+            matchesNeedle(message.subject, subjectNeedle) &&
+            (matchesNeedle(message.fromName, fromNeedle) ||
+              matchesNeedle(message.fromAddress, fromNeedle))
+        );
+
+        messages = messages.concat(mapped);
+        nextUrl = data["@odata.nextLink"] || null;
       }
-
-      messages = messages.filter(
-        (message) =>
-          matchesNeedle(message.subject, subjectNeedle) &&
-          (matchesNeedle(message.fromName, fromNeedle) ||
-            matchesNeedle(message.fromAddress, fromNeedle))
-      );
 
       messages = messages.slice(0, requestedTop);
 
@@ -1934,7 +1942,7 @@ function createServer() {
           : [
               "No recent messages matched the current filter.",
               `Folder searched: ${folder || "inbox"}`,
-              `Messages scanned: ${data.value?.length || 0}`,
+              `Messages scanned: ${scannedCount}`,
               subjectNeedle ? `Subject filter: ${subjectContains}` : "",
               fromNeedle ? `Sender filter: ${fromContains}` : "",
               onlyWithAttachments ? "Attachment filter: hasAttachments=true" : "",
@@ -1947,7 +1955,8 @@ function createServer() {
           mailbox,
           folder: folder || "inbox",
           requestedTop,
-          scannedCount: data.value?.length || 0,
+          scannedCount,
+          pagesFetched: pages,
           returnedCount: messages.length,
           onlyWithAttachments,
           subjectContains: subjectContains || "",
@@ -1974,7 +1983,7 @@ function createServer() {
       inputSchema: z.object({
         mailbox: z.string().default("me"),
         folder: z.string().default("inbox"),
-        top: z.number().int().min(1).max(50).default(10),
+        top: z.number().int().min(1).max(2000).default(10),
         onlyWithAttachments: z.boolean().default(true),
         subjectContains: z.string().optional().default(""),
         fromContains: z.string().optional().default(""),
@@ -1987,34 +1996,50 @@ function createServer() {
     try {
       const collectionUrl = messageCollectionUrl(mailbox, folder);
       const searchValue = `"${String(query).replace(/"/g, '\\"')}"`;
-      const fetchTop = Math.min(Math.max(top, 1), 50);
-      const url =
+      const perPage = Math.min(Math.max(top, 1), 100);
+      const maxPages = Math.min(Math.max(Math.ceil(top / 20), 5), 100);
+
+      let nextUrl =
         `${collectionUrl}` +
         `?$search=${encodeURIComponent(searchValue)}` +
         `&$select=id,subject,receivedDateTime,hasAttachments,from,toRecipients,ccRecipients,bodyPreview` +
-        `&$top=${fetchTop}`;
+        `&$top=${perPage}`;
 
-      const data = await graphGetJson(url, { ConsistencyLevel: "eventual" });
+      let messages = [];
+      let scannedCount = 0;
+      let pages = 0;
 
-      let messages = (data.value || []).map((message) => ({
-        id: message.id,
-        subject: message.subject,
-        receivedDateTime: message.receivedDateTime,
-        hasAttachments: message.hasAttachments,
-        fromName: message.from?.emailAddress?.name || "",
-        fromAddress: message.from?.emailAddress?.address || "",
-        to: (message.toRecipients || [])
-          .map((r) => r.emailAddress?.address)
-          .filter(Boolean),
-        cc: (message.ccRecipients || [])
-          .map((r) => r.emailAddress?.address)
-          .filter(Boolean),
-        bodyPreview: message.bodyPreview || "",
-      }));
+      while (nextUrl && messages.length < top && pages < maxPages) {
+        const data = await graphGetJson(nextUrl, { ConsistencyLevel: "eventual" });
+        const batch = data.value || [];
+        scannedCount += batch.length;
+        pages += 1;
 
-      if (onlyWithAttachments) {
-        messages = messages.filter((message) => message.hasAttachments);
+        let mapped = batch.map((message) => ({
+          id: message.id,
+          subject: message.subject,
+          receivedDateTime: message.receivedDateTime,
+          hasAttachments: message.hasAttachments,
+          fromName: message.from?.emailAddress?.name || "",
+          fromAddress: message.from?.emailAddress?.address || "",
+          to: (message.toRecipients || [])
+            .map((r) => r.emailAddress?.address)
+            .filter(Boolean),
+          cc: (message.ccRecipients || [])
+            .map((r) => r.emailAddress?.address)
+            .filter(Boolean),
+          bodyPreview: message.bodyPreview || "",
+        }));
+
+        if (onlyWithAttachments) {
+          mapped = mapped.filter((message) => message.hasAttachments);
+        }
+
+        messages = messages.concat(mapped);
+        nextUrl = data["@odata.nextLink"] || null;
       }
+
+      messages = messages.slice(0, top);
 
       const text =
         messages.length > 0
@@ -2031,6 +2056,8 @@ function createServer() {
           mailbox,
           folder: folder || "all",
           query,
+          scannedCount,
+          pagesFetched: pages,
           returnedCount: messages.length,
           onlyWithAttachments,
           messages,
@@ -2056,7 +2083,7 @@ function createServer() {
         mailbox: z.string().default("me"),
         folder: z.string().default("all"),
         query: z.string(),
-        top: z.number().int().min(1).max(50).default(25),
+        top: z.number().int().min(1).max(2000).default(25),
         onlyWithAttachments: z.boolean().default(false),
       }),
     },
