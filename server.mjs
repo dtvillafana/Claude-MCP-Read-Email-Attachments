@@ -482,7 +482,7 @@ async function getValidAccessToken() {
   throw new Error("Microsoft 365 is not logged in yet. Please call begin_auth first.");
 }
 
-async function graphGetJson(url) {
+async function graphGetJson(url, extraHeaders = {}) {
   const token = await getValidAccessToken();
 
   const res = await fetch(url, {
@@ -490,6 +490,7 @@ async function graphGetJson(url) {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
+      ...extraHeaders,
     },
   });
 
@@ -1980,6 +1981,86 @@ function createServer() {
       }),
     },
     listMessagesHandler
+  );
+
+  const searchMessagesHandler = async ({ mailbox, folder, query, top, onlyWithAttachments }) => {
+    try {
+      const collectionUrl = messageCollectionUrl(mailbox, folder);
+      const searchValue = `"${String(query).replace(/"/g, '\\"')}"`;
+      const fetchTop = Math.min(Math.max(top, 1), 50);
+      const url =
+        `${collectionUrl}` +
+        `?$search=${encodeURIComponent(searchValue)}` +
+        `&$select=id,subject,receivedDateTime,hasAttachments,from,toRecipients,ccRecipients,bodyPreview` +
+        `&$top=${fetchTop}`;
+
+      const data = await graphGetJson(url, { ConsistencyLevel: "eventual" });
+
+      let messages = (data.value || []).map((message) => ({
+        id: message.id,
+        subject: message.subject,
+        receivedDateTime: message.receivedDateTime,
+        hasAttachments: message.hasAttachments,
+        fromName: message.from?.emailAddress?.name || "",
+        fromAddress: message.from?.emailAddress?.address || "",
+        to: (message.toRecipients || [])
+          .map((r) => r.emailAddress?.address)
+          .filter(Boolean),
+        cc: (message.ccRecipients || [])
+          .map((r) => r.emailAddress?.address)
+          .filter(Boolean),
+        bodyPreview: message.bodyPreview || "",
+      }));
+
+      if (onlyWithAttachments) {
+        messages = messages.filter((message) => message.hasAttachments);
+      }
+
+      const text =
+        messages.length > 0
+          ? messages
+              .map(
+                (message, index) =>
+                  `${index + 1}. ${message.subject || "(no subject)"}\nFrom: ${formatSender(message.fromName, message.fromAddress)}\nTo: ${message.to.join(", ")}\nReceived: ${message.receivedDateTime}\nHas Attachments: ${message.hasAttachments}${message.bodyPreview ? `\nPreview: ${message.bodyPreview.slice(0, 200)}` : ""}\nMessage ID: ${message.id}`
+              )
+              .join("\n\n")
+          : `No messages matched search query: ${query}`;
+
+      return {
+        structuredContent: {
+          mailbox,
+          folder: folder || "all",
+          query,
+          returnedCount: messages.length,
+          onlyWithAttachments,
+          messages,
+        },
+        content: [{ type: "text", text }],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(err?.message || err) }],
+      };
+    }
+  };
+
+  registerAliases(
+    server,
+    "search_messages",
+    {
+      title: "Search Outlook Messages",
+      description:
+        "Full-text search Outlook mail (subject, body, sender, attachments) using Microsoft Graph's native $search, unbounded by recency. Searches the entire mailbox by default (folder='all'); pass a specific folder (e.g. 'inbox', 'archive') to narrow it.",
+      inputSchema: z.object({
+        mailbox: z.string().default("me"),
+        folder: z.string().default("all"),
+        query: z.string(),
+        top: z.number().int().min(1).max(50).default(25),
+        onlyWithAttachments: z.boolean().default(false),
+      }),
+    },
+    searchMessagesHandler
   );
 
   const listAttachmentsHandler = async ({ messageId, mailbox }) => {
