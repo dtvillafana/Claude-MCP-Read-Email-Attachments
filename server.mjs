@@ -2090,6 +2090,99 @@ function createServer() {
     searchMessagesHandler
   );
 
+  const listFlaggedMessagesHandler = async ({ mailbox, folder, top }) => {
+    try {
+      const collectionUrl = messageCollectionUrl(mailbox, folder);
+      const perPage = Math.min(Math.max(top, 1), 100);
+      const maxPages = Math.min(Math.max(Math.ceil(top / 20), 5), 100);
+
+      // Graph rejects $orderby combined with a flag/flagStatus $filter as an
+      // "InefficientFilter"; results come back newest-first-ish per page but
+      // are not guaranteed globally sorted, so pull enough pages to satisfy top.
+      let nextUrl =
+        `${collectionUrl}` +
+        `?$filter=${encodeURIComponent("flag/flagStatus eq 'flagged'")}` +
+        `&$select=id,subject,receivedDateTime,hasAttachments,from,toRecipients,ccRecipients,bodyPreview` +
+        `&$top=${perPage}`;
+
+      let messages = [];
+      let scannedCount = 0;
+      let pages = 0;
+
+      while (nextUrl && messages.length < top && pages < maxPages) {
+        const data = await graphGetJson(nextUrl, { ConsistencyLevel: "eventual" });
+        const batch = data.value || [];
+        scannedCount += batch.length;
+        pages += 1;
+
+        const mapped = batch.map((message) => ({
+          id: message.id,
+          subject: message.subject,
+          receivedDateTime: message.receivedDateTime,
+          hasAttachments: message.hasAttachments,
+          fromName: message.from?.emailAddress?.name || "",
+          fromAddress: message.from?.emailAddress?.address || "",
+          to: (message.toRecipients || [])
+            .map((r) => r.emailAddress?.address)
+            .filter(Boolean),
+          cc: (message.ccRecipients || [])
+            .map((r) => r.emailAddress?.address)
+            .filter(Boolean),
+          bodyPreview: message.bodyPreview || "",
+        }));
+
+        messages = messages.concat(mapped);
+        nextUrl = data["@odata.nextLink"] || null;
+      }
+
+      messages.sort((a, b) => (a.receivedDateTime < b.receivedDateTime ? 1 : -1));
+      messages = messages.slice(0, top);
+
+      const text =
+        messages.length > 0
+          ? messages
+              .map(
+                (message, index) =>
+                  `${index + 1}. ${message.subject || "(no subject)"}\nFrom: ${formatSender(message.fromName, message.fromAddress)}\nTo: ${message.to.join(", ")}\nReceived: ${message.receivedDateTime}\nHas Attachments: ${message.hasAttachments}${message.bodyPreview ? `\nPreview: ${message.bodyPreview.slice(0, 200)}` : ""}\nMessage ID: ${message.id}`
+              )
+              .join("\n\n")
+          : `No flagged messages found in folder: ${folder || "inbox"}`;
+
+      return {
+        structuredContent: {
+          mailbox,
+          folder: folder || "inbox",
+          scannedCount,
+          pagesFetched: pages,
+          returnedCount: messages.length,
+          messages,
+        },
+        content: [{ type: "text", text }],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(err?.message || err) }],
+      };
+    }
+  };
+
+  registerAliases(
+    server,
+    "list_flagged_messages",
+    {
+      title: "List Flagged Outlook Messages",
+      description:
+        "List Outlook messages flagged for follow-up (Graph flag/flagStatus = 'flagged'). Defaults to the inbox; pass folder='all' to search the whole mailbox. Newest-flagged-first.",
+      inputSchema: z.object({
+        mailbox: z.string().default("me"),
+        folder: z.string().default("inbox"),
+        top: z.number().int().min(1).max(500).default(50),
+      }),
+    },
+    listFlaggedMessagesHandler
+  );
+
   const listAttachmentsHandler = async ({ messageId, mailbox }) => {
     try {
       const base = mailboxPrefix(mailbox);
