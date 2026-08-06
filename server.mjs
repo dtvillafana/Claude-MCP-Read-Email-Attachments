@@ -1890,7 +1890,7 @@ function createServer() {
 
       let nextUrl =
         `${collectionUrl}` +
-        `?$select=id,subject,receivedDateTime,hasAttachments,from,bodyPreview` +
+        `?$select=id,subject,receivedDateTime,hasAttachments,from,bodyPreview,isRead` +
         `&$orderby=receivedDateTime desc` +
         `&$top=${perPage}`;
 
@@ -1912,6 +1912,7 @@ function createServer() {
           fromName: message.from?.emailAddress?.name || "",
           fromAddress: message.from?.emailAddress?.address || "",
           bodyPreview: message.bodyPreview || "",
+          isRead: message.isRead,
         }));
 
         if (onlyWithAttachments) {
@@ -2002,7 +2003,7 @@ function createServer() {
       let nextUrl =
         `${collectionUrl}` +
         `?$search=${encodeURIComponent(searchValue)}` +
-        `&$select=id,subject,receivedDateTime,hasAttachments,from,toRecipients,ccRecipients,bodyPreview` +
+        `&$select=id,subject,receivedDateTime,hasAttachments,from,toRecipients,ccRecipients,bodyPreview,isRead` +
         `&$top=${perPage}`;
 
       let messages = [];
@@ -2029,6 +2030,7 @@ function createServer() {
             .map((r) => r.emailAddress?.address)
             .filter(Boolean),
           bodyPreview: message.bodyPreview || "",
+          isRead: message.isRead,
         }));
 
         if (onlyWithAttachments) {
