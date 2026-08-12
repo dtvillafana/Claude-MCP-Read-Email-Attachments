@@ -43,7 +43,7 @@ This server runs as a local MCP process started by Claude Desktop. It:
 2. Lists Outlook emails and their attachments through Microsoft Graph
 3. Downloads and parses attachment contents locally
 4. Returns structured text and image blocks directly to Claude Desktop
-5. Reads the **text/body** of a specific email (HTML converted to plain text) via `read_email`
+5. Reads the **text/body** of a specific email (HTML converted to plain text) via `read_email`, or in offset-based slices via `read_email_body_chunk` for long emails that exceed the single-call character limit
 6. Composes outgoing Outlook emails with **local files attached** (e.g. PPTX), saved as a draft for review or sent immediately
 
 ### Supported Formats
@@ -74,6 +74,7 @@ This server runs as a local MCP process started by Claude Desktop. It:
 | `list_email_attachments` | List attachments for a specific email |
 | `read_email_attachment` | Download, parse, and return attachment content |
 | `read_email` | Read the full text/body of a specific Outlook email (subject, sender, recipients, date, body) |
+| `read_email_body_chunk` | Read the message body in offset-based slices, for emails whose body was cut off by `read_email`'s character limit |
 | `send_outlook_email` | Attach local files (e.g. `.pptx`) and save a draft (default) or send immediately |
 
 > **Outbound send is opt-in per call.** `send_outlook_email` defaults to creating a **draft** in your Drafts folder — nothing leaves your mailbox until you review and send it in Outlook. Pass `send_now: true` to send directly. Each attachment must be **under 3 MB** (see Limitations).

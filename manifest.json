@@ -90,6 +90,10 @@
       "description": "Read the full text/body of a specific Outlook email (subject, sender, recipients, date, body)."
     },
     {
+      "name": "read_email_body_chunk",
+      "description": "Read an Outlook email's message body in offset-based slices, for emails whose body was cut off by read_email's character limit."
+    },
+    {
       "name": "send_outlook_email",
       "description": "Compose an Outlook email with local file attachments (e.g. a .pptx) and save it as a draft or send it immediately."
     }
