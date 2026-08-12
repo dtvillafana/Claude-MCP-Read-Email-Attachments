@@ -2373,13 +2373,24 @@ function createServer() {
     readAttachmentHandler
   );
 
+  async function fetchEmailBody(mailbox, messageId) {
+    const base = mailboxPrefix(mailbox);
+    const url =
+      `${base}/messages/${encodeURIComponent(messageId)}` +
+      `?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,bodyPreview,body,webLink`;
+    const m = await graphGetJson(url);
+
+    const isHtml = String(m.body?.contentType || "").toLowerCase() === "html";
+    const bodyText = isHtml
+      ? htmlToPlainText(m.body?.content)
+      : normalizeExtractedText(m.body?.content || "");
+
+    return { message: m, bodyText };
+  }
+
   const readEmailHandler = async ({ messageId, mailbox }) => {
     try {
-      const base = mailboxPrefix(mailbox);
-      const url =
-        `${base}/messages/${encodeURIComponent(messageId)}` +
-        `?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,bodyPreview,body,webLink`;
-      const m = await graphGetJson(url);
+      const { message: m, bodyText } = await fetchEmailBody(mailbox, messageId);
 
       const fromStr = formatSender(
         m.from?.emailAddress?.name,
@@ -2394,10 +2405,6 @@ function createServer() {
         .filter(Boolean)
         .join(", ");
 
-      const isHtml = String(m.body?.contentType || "").toLowerCase() === "html";
-      const bodyText = isHtml
-        ? htmlToPlainText(m.body?.content)
-        : normalizeExtractedText(m.body?.content || "");
       const truncated = truncateExtractedText(bodyText);
 
       const headerLines = [
@@ -2457,6 +2464,65 @@ function createServer() {
       }),
     },
     readEmailHandler
+  );
+
+  const readEmailBodyChunkHandler = async ({ messageId, mailbox, offset, maxChars }) => {
+    try {
+      const { message: m, bodyText } = await fetchEmailBody(mailbox, messageId);
+
+      const totalLength = bodyText.length;
+      const start = Math.min(Math.max(offset || 0, 0), totalLength);
+      const chunkSize = Math.min(Math.max(maxChars || MAX_RETURN_CHARS, 1), MAX_RETURN_CHARS);
+      const end = Math.min(start + chunkSize, totalLength);
+      const chunkText = bodyText.slice(start, end);
+      const hasMore = end < totalLength;
+
+      const headerLines = [
+        `Subject: ${m.subject || "(no subject)"}`,
+        `Body length: ${totalLength.toLocaleString()} characters total`,
+        `Returning characters ${start.toLocaleString()}-${end.toLocaleString()}`,
+        hasMore
+          ? `More text remains. Call this tool again with offset=${end} to continue reading.`
+          : "This is the end of the message body.",
+      ];
+
+      const textOut = `${headerLines.join("\n")}\n\n${chunkText || "(empty body)"}`;
+
+      return {
+        structuredContent: {
+          messageId: m.id,
+          subject: m.subject,
+          offset: start,
+          nextOffset: hasMore ? end : null,
+          returnedLength: chunkText.length,
+          totalLength,
+          hasMore,
+        },
+        content: [{ type: "text", text: textOut }],
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: String(err?.message || err) }],
+      };
+    }
+  };
+
+  registerAliases(
+    server,
+    "read_email_body_chunk",
+    {
+      title: "Read Outlook Email Body (Full, Chunked)",
+      description:
+        "Fetch a slice of the full plain-text body of a specific Outlook email, for cases where read_email's body was cut off by its character limit. Call with offset=0 first, then re-call with the returned nextOffset (raise maxChars up to 35000 per call if fewer, larger calls are preferred) to keep reading until hasMore is false. Use list_recent_messages first to get the messageId.",
+      inputSchema: z.object({
+        messageId: z.string(),
+        mailbox: z.string().default("me"),
+        offset: z.number().int().min(0).default(0),
+        maxChars: z.number().int().min(1).max(MAX_RETURN_CHARS).default(MAX_RETURN_CHARS),
+      }),
+    },
+    readEmailBodyChunkHandler
   );
 
   const sendEmailHandler = async ({
