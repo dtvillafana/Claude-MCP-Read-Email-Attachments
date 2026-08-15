@@ -78,6 +78,7 @@ const AUTO_OPEN_BROWSER =
   String(process.env.M365_AUTO_OPEN_BROWSER || "true").toLowerCase() !== "false";
 
 const MAX_RETURN_CHARS = 35000;
+const MAX_EMAIL_BODY_CHUNK_CHARS = 12000;
 const MAX_IMAGE_BLOCKS = 20;
 const MAX_IMAGE_BLOCK_BYTES = 450 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 700 * 1024;
@@ -625,6 +626,14 @@ function normalizeExtractedText(text) {
     .replace(/\r/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeEmailBodyText(text) {
+  return String(text || "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
     .trim();
 }
 
@@ -2378,12 +2387,14 @@ function createServer() {
     const url =
       `${base}/messages/${encodeURIComponent(messageId)}` +
       `?$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,hasAttachments,bodyPreview,body,webLink`;
-    const m = await graphGetJson(url);
+    const m = await graphGetJson(url, {
+      Prefer: 'outlook.body-content-type="text"',
+    });
 
     const isHtml = String(m.body?.contentType || "").toLowerCase() === "html";
     const bodyText = isHtml
       ? htmlToPlainText(m.body?.content)
-      : normalizeExtractedText(m.body?.content || "");
+      : normalizeEmailBodyText(m.body?.content);
 
     return { message: m, bodyText };
   }
@@ -2418,7 +2429,7 @@ function createServer() {
 
       if (truncated.truncated) {
         headerLines.push(
-          `Notice: body truncated to ${truncated.returnedLength.toLocaleString()} of ${truncated.totalLength.toLocaleString()} characters.`
+          `Notice: body truncated to ${truncated.returnedLength.toLocaleString()} of ${truncated.totalLength.toLocaleString()} characters. Call read_email_body_chunk with this messageId and offset=${truncated.returnedLength} to continue reading the rest.`
         );
       }
 
@@ -2439,6 +2450,7 @@ function createServer() {
             bodyPreview: m.bodyPreview || "",
             bodyTextLength: bodyText.length,
             truncated: truncated.truncated,
+            nextOffset: truncated.truncated ? truncated.returnedLength : null,
           },
         },
         content: [{ type: "text", text: textOut }],
@@ -2471,16 +2483,40 @@ function createServer() {
       const { message: m, bodyText } = await fetchEmailBody(mailbox, messageId);
 
       const totalLength = bodyText.length;
-      const start = Math.min(Math.max(offset || 0, 0), totalLength);
-      const chunkSize = Math.min(Math.max(maxChars || MAX_RETURN_CHARS, 1), MAX_RETURN_CHARS);
-      const end = Math.min(start + chunkSize, totalLength);
+      let start = Math.min(Math.max(offset || 0, 0), totalLength);
+      if (
+        start > 0 &&
+        /[\uDC00-\uDFFF]/.test(bodyText[start]) &&
+        /[\uD800-\uDBFF]/.test(bodyText[start - 1])
+      ) {
+        start -= 1;
+      }
+
+      const chunkSize = Math.min(
+        Math.max(maxChars || MAX_EMAIL_BODY_CHUNK_CHARS, 1),
+        MAX_EMAIL_BODY_CHUNK_CHARS
+      );
+      let end = Math.min(start + chunkSize, totalLength);
+
+      // Do not split a Unicode surrogate pair between consecutive chunks.
+      if (
+        end < totalLength &&
+        end > start &&
+        /[\uD800-\uDBFF]/.test(bodyText[end - 1]) &&
+        /[\uDC00-\uDFFF]/.test(bodyText[end])
+      ) {
+        end += 1;
+      }
+
       const chunkText = bodyText.slice(start, end);
       const hasMore = end < totalLength;
 
       const headerLines = [
         `Subject: ${m.subject || "(no subject)"}`,
         `Body length: ${totalLength.toLocaleString()} characters total`,
-        `Returning characters ${start.toLocaleString()}-${end.toLocaleString()}`,
+        chunkText
+          ? `Returning characters ${start.toLocaleString()}-${(end - 1).toLocaleString()}`
+          : "Returning an empty body",
         hasMore
           ? `More text remains. Call this tool again with offset=${end} to continue reading.`
           : "This is the end of the message body.",
@@ -2497,6 +2533,7 @@ function createServer() {
           returnedLength: chunkText.length,
           totalLength,
           hasMore,
+          bodyText: chunkText,
         },
         content: [{ type: "text", text: textOut }],
       };
@@ -2514,12 +2551,17 @@ function createServer() {
     {
       title: "Read Outlook Email Body (Full, Chunked)",
       description:
-        "Fetch a slice of the full plain-text body of a specific Outlook email, for cases where read_email's body was cut off by its character limit. Call with offset=0 first, then re-call with the returned nextOffset (raise maxChars up to 35000 per call if fewer, larger calls are preferred) to keep reading until hasMore is false. Use list_recent_messages first to get the messageId.",
+        "Fetch a slice of the full plain-text body of a specific Outlook email, for cases where read_email's body was cut off by its character limit. The body text is returned as bodyText in structuredContent and as text content. Call with offset=0 first, then re-call with the returned nextOffset to keep reading until hasMore is false. Use list_recent_messages first to get the messageId.",
       inputSchema: z.object({
         messageId: z.string(),
         mailbox: z.string().default("me"),
         offset: z.number().int().min(0).default(0),
-        maxChars: z.number().int().min(1).max(MAX_RETURN_CHARS).default(MAX_RETURN_CHARS),
+        maxChars: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_EMAIL_BODY_CHUNK_CHARS)
+          .default(MAX_EMAIL_BODY_CHUNK_CHARS),
       }),
     },
     readEmailBodyChunkHandler
